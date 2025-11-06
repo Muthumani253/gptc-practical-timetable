@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-# extract_pdf.py — robust dept_name lookup & app-local settings
-# Replaces earlier version; drop into app/extract_pdf.py (overwrite).
+# extract_pdf.py (corrected)
+# Produces:
+#  - data/extracted/PracticalMaster.csv
+#  - data/extracted/StudentSubjectMap.csv
+
 import re
 import os
 import sys
@@ -9,114 +12,63 @@ import argparse
 from collections import Counter
 from datetime import datetime
 
-# Ensure stdout uses utf-8 on Windows console to prevent encoding errors
+import pdfplumber
+import pandas as pd
+
+# --- Try to ensure stdout uses utf-8 on Windows (you already added this elsewhere) ---
 try:
     sys.stdout.reconfigure(encoding='utf-8')
 except Exception:
     pass
-
-import pdfplumber
-import pandas as pd
 
 # --- Setup paths ---
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 INPUT_DIR = os.path.join(DATA_DIR, "input_pdf")
 EXTRACTED_DIR = os.path.join(DATA_DIR, "extracted")
-
-# IMPORTANT: look for dept_codes.json next to this file (app/)
-SETTINGS_DIR = os.path.dirname(__file__)
+SETTINGS_DIR = os.path.join(PROJECT_ROOT, "settings")
 
 os.makedirs(EXTRACTED_DIR, exist_ok=True)
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(SETTINGS_DIR, exist_ok=True)
 
 
 # --- Helper functions ---
 
 def load_dept_map():
-    """
-    Load dept_codes.json from app/ if present. Return dict mapping strings to names.
-    """
-    candidates = [
-        os.path.join(SETTINGS_DIR, "dept_codes.json"),
-        os.path.join(PROJECT_ROOT, "settings", "dept_codes.json"),
-        os.path.join(PROJECT_ROOT, "dept_codes.json")
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    dm = json.load(f)
-                    # ensure keys are strings and stripped
-                    out = {str(k).strip(): v for k, v in dm.items()}
-                    return out
-            except Exception as e:
-                print(f"[WARN] Failed reading dept_codes.json at {p}: {e}")
-    print("[WARN] dept_codes.json not found in app/ or settings/; dept_name will be empty.")
+    path = os.path.join(SETTINGS_DIR, "dept_codes.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
-
-
-def get_dept_name(ncno, dept_map):
-    """
-    Robust lookup for dept_name.
-    ncno: could be int, str, with/without leading zeros.
-    dept_map keys expected as string codes like '1030' or '1000'.
-    Attempts:
-      1) exact str(ncno).strip()
-      2) zero-pad to 4 digits
-      3) first 3 digits
-      4) trimmed (remove non-digits)
-    Returns empty string if not found.
-    """
-    if ncno is None:
-        return ""
-    s = str(ncno).strip()
-    if not s:
-        return ""
-    # remove stray characters
-    s_digits = re.sub(r"\D", "", s)
-    candidates = []
-    candidates.append(s)
-    if s_digits:
-        candidates.append(s_digits)
-        candidates.append(s_digits.zfill(4))
-        if len(s_digits) >= 3:
-            candidates.append(s_digits[:3])
-        if len(s_digits) >= 2:
-            candidates.append(s_digits[:2])
-
-    # unique preserve order
-    seen = set()
-    for c in candidates:
-        if c and c not in seen:
-            seen.add(c)
-    for c in seen:
-        if c in dept_map:
-            return dept_map[c] or ""
-    # fallback: try any key that contains these digits (loose)
-    for k, v in dept_map.items():
-        if s_digits and s_digits in k:
-            return v or ""
-    return ""
 
 
 def parse_institution(text):
     """
     Extract institution code and name from the first page text.
-    Returns (ins_code, institute_line, header_text)
+    Returns: (ins_code, institute_line, header_text)
+    header_text is a friendly header string (ins_code + institute_line) when available.
     """
     ins_code = None
     institute_line = None
+    header_text = None
 
+    # Pattern A: "Ins Code Name of the Institution" block
     m = re.search(r"Ins\s*Code\s*Name\s*of\s*the\s*Institution\s*\n+(\d{2,4})\s+([^\n]+)", text, flags=re.IGNORECASE)
     if m:
         ins_code = m.group(1).strip()
         institute_line = m.group(2).strip()
 
+    # Pattern B: "Institution Code" wording
     if not ins_code:
         m = re.search(r"\bIns(?:titution)?\s*Code.*?\n+(\d{2,4})\b", text, flags=re.IGNORECASE)
         if m:
             ins_code = m.group(1).strip()
 
+    # Pattern C: Any line starting with "<code> GOVERNMENT POLYTECHNIC COLLEGE ..."
     if not institute_line:
         m2 = re.search(r"(\d{2,4}\s*,?\s*GOVERNMENT\s+POLYTECHNIC\s+COLLEGE[^\n]*)", text, flags=re.IGNORECASE)
         if m2:
@@ -126,7 +78,7 @@ def parse_institution(text):
                 if mcode:
                     ins_code = mcode.group(1).strip()
 
-    header_text = None
+    # Compose header text
     if ins_code and institute_line:
         if not institute_line.strip().startswith(ins_code):
             header_text = f"{ins_code} , {institute_line}"
@@ -134,6 +86,9 @@ def parse_institution(text):
             header_text = institute_line
     elif ins_code:
         header_text = f"{ins_code}"
+    elif institute_line:
+        header_text = institute_line
+
     return ins_code, institute_line, header_text
 
 
@@ -173,8 +128,7 @@ def extract_summary_rows(text):
 
             if not re.fullmatch(r"\d+", s_no):
                 continue
-            if not re.fullmatch(r"\d{2,4}", ncno):
-                # accept 2-4 digits; otherwise skip
+            if not re.fullmatch(r"\d{3,4}", ncno):
                 continue
             if not re.fullmatch(r"[A-Z0-9\-]+", sub_code):
                 continue
@@ -218,7 +172,7 @@ def extract_student_rows(text):
 
     header_pattern = re.compile(r"S\.?No\s+NCNO\s+Reg\s*No\s+Name.*DoB\s+Regl\s+Sem\s+Col", re.IGNORECASE)
     line_pattern = re.compile(
-        r"^\s*(\d+)\s+(\d{2,4})\s+(\d+)\s+(.+?)\s+(\d{2}\.\d{2}\.\d{4})\s+([A-Z0-9]+)\s+(\d+)\s+(\d+)\s*$"
+        r"^\s*(\d+)\s+(\d{3,4})\s+(\d+)\s+(.+?)\s+(\d{2}\.\d{2}\.\d{4})\s+([A-Z0-9]+)\s+(\d+)\s+(\d+)\s*$"
     )
 
     for raw_line in text.splitlines():
@@ -285,6 +239,7 @@ def extract_student_rows(text):
                         })
                     except Exception:
                         pass
+
     return rows
 
 
@@ -303,6 +258,8 @@ def extract_all(pdf_path):
     student_rows_all = []
 
     ins_code = None
+    institute_line = ""
+    header_text = ""
     exam_month_year = None
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -312,15 +269,22 @@ def extract_all(pdf_path):
 
         for pno, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
-            print(f"[PAGE {pno}/{total_pages}] Reading... ", end="")
+            # safe print; avoid unicode characters in print if console doesn't support
+            try:
+                print(f"[PAGE {pno}/{total_pages}] Reading... ", end="")
+            except Exception:
+                pass
 
             if pno == 1:
-                ins_code, _, _ = parse_institution(text)
+                ins_code, institute_line, header_text = parse_institution(text)
                 exam_month_year = month_year_from_text(text)
 
             kind = detect_page_kind(text)
             if kind == "summary":
-                print("Summary section found")
+                try:
+                    print("Summary section found")
+                except Exception:
+                    pass
                 rows = extract_summary_rows(text)
                 for r in rows:
                     ncno = r["ncno"]
@@ -329,9 +293,15 @@ def extract_all(pdf_path):
                     ptype = r["type"]
                     noc = r["noc"]
                     practical_code = f"{ins_code}-{ncno}-{sub_code}" if ins_code else f"{ncno}-{sub_code}"
-                    dept_name = get_dept_name(ncno, dept_map)
+
+                    # dept_name: try mapping, fallback to ncno so CSV isn't blank
+                    dept_name = dept_map.get(ncno)
+                    if dept_name is None or str(dept_name).strip() == "":
+                        dept_name = str(ncno)
+
                     practical_master[practical_code] = {
                         "ins_code": ins_code or "",
+                        "institute_line": header_text or institute_line or "",
                         "ncno": ncno,
                         "dept_name": dept_name,
                         "sub_code": sub_code,
@@ -345,13 +315,22 @@ def extract_all(pdf_path):
 
             elif kind == "subject":
                 practical_code, subject_name_pg, ptype_pg = extract_subject_header(text)
-                print(f"Subject section: {practical_code or 'Unknown'}")
+                try:
+                    print(f"Subject section: {practical_code or 'Unknown'}")
+                except Exception:
+                    pass
                 if not practical_code:
                     continue
 
-                print(f"  -> Extracting student list for {practical_code} ...", end="")
+                try:
+                    print(f"  -> Extracting student list for {practical_code} ...", end="")
+                except Exception:
+                    pass
                 stud_rows = extract_student_rows(text)
-                print(f" {len(stud_rows)} students found")
+                try:
+                    print(f" {len(stud_rows)} students found")
+                except Exception:
+                    pass
 
                 col_no = None
                 if stud_rows:
@@ -359,7 +338,10 @@ def extract_all(pdf_path):
 
                 for s in stud_rows:
                     ncno = s["ncno"]
-                    dept_name = get_dept_name(ncno, dept_map)
+                    dept_name = dept_map.get(ncno)
+                    if dept_name is None or str(dept_name).strip() == "":
+                        dept_name = str(ncno)
+
                     student_rows_all.append({
                         "reg_no": s["reg_no"],
                         "student_name": s["student_name"],
@@ -377,11 +359,15 @@ def extract_all(pdf_path):
                     })
 
                 if practical_code not in practical_master:
-                    dept_guess = get_dept_name(practical_code.split("-")[1] if "-" in practical_code else "", dept_map)
+                    ncno = practical_code.split("-")[1] if "-" in practical_code and len(practical_code.split("-")) > 1 else ""
+                    dept_name = dept_map.get(ncno)
+                    if dept_name is None or str(dept_name).strip() == "":
+                        dept_name = str(ncno)
                     practical_master[practical_code] = {
                         "ins_code": practical_code.split("-")[0] if "-" in practical_code else (ins_code or ""),
-                        "ncno": practical_code.split("-")[1] if "-" in practical_code else "",
-                        "dept_name": dept_guess,
+                        "institute_line": header_text or institute_line or "",
+                        "ncno": ncno,
+                        "dept_name": dept_name,
                         "sub_code": practical_code.split("-")[-1],
                         "subject_name": subject_name_pg or "",
                         "type": ptype_pg or "",
@@ -398,17 +384,22 @@ def extract_all(pdf_path):
                             practical_master[practical_code]["total_candidates"], len(stud_rows)
                         )
             else:
-                print("Skipped (no match)")
+                try:
+                    print("Skipped (no match)")
+                except Exception:
+                    pass
 
+    # Write CSVs
     pm_path = os.path.join(EXTRACTED_DIR, "PracticalMaster.csv")
     ssm_path = os.path.join(EXTRACTED_DIR, "StudentSubjectMap.csv")
 
-    pm_cols = ["ins_code","ncno","dept_name","sub_code","subject_name","type","col_no","total_candidates","practical_code","exam_month_year"]
-    ssm_cols = ["reg_no","student_name","dob","regl","sem","ncno","dept_name","sub_code","subject_name","type","col_no","practical_code","ins_code"]
+    pm_cols = ["ins_code", "institute_line", "ncno", "dept_name", "sub_code", "subject_name", "type", "col_no", "total_candidates", "practical_code", "exam_month_year"]
+    ssm_cols = ["reg_no", "student_name", "dob", "regl", "sem", "ncno", "dept_name", "sub_code", "subject_name", "type", "col_no", "practical_code", "ins_code"]
 
     pm_df = pd.DataFrame([practical_master[k] for k in sorted(practical_master.keys())], columns=pm_cols)
     ssm_df = pd.DataFrame(student_rows_all, columns=ssm_cols)
 
+    # Save with utf-8-sig to help Excel/Streamlit
     pm_df.to_csv(pm_path, index=False, encoding="utf-8-sig")
     ssm_df.to_csv(ssm_path, index=False, encoding="utf-8-sig")
 
@@ -424,7 +415,10 @@ def extract_all(pdf_path):
     print(f"\n[OK] Wrote: {pm_path}")
     print(f"[OK] Wrote: {ssm_path}")
     print(f"[OK] Log saved to: {os.path.join(EXTRACTED_DIR, 'extraction_log.txt')}")
-    print("\n✅ Extraction complete.\n")
+    try:
+        print("\n✅ Extraction complete.\n")
+    except Exception:
+        pass
 
 
 def find_default_pdf():
