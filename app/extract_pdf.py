@@ -29,7 +29,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 INPUT_DIR = os.path.join(DATA_DIR, "input_pdf")
 EXTRACTED_DIR = os.path.join(DATA_DIR, "extracted")
-SETTINGS_DIR = os.path.join(PROJECT_ROOT, "settings")
+SETTINGS_DIR = os.path.join(os.path.dirname(__file__))
 
 os.makedirs(EXTRACTED_DIR, exist_ok=True)
 
