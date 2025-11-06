@@ -1,25 +1,23 @@
+import sys
+# ensure stdout uses utf-8 where possible (no crash on older Python)
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
 #!/usr/bin/env python3
 """
-extract_pdf.py
-Reads a DOTE Practical Checklist PDF and produces two CSVs:
-- data/extracted/PracticalMaster.csv
-- data/extracted/StudentSubjectMap.csv
-
-Usage (from project root):
-  conda activate timetable
-  python app/extract_pdf.py --input "data/input_pdf/your_checklist.pdf"
-
-If --input is omitted, the script will pick the first .pdf in data/input_pdf/.
+extract_pdf.py — DOTE Practical Checklist PDF extractor
+Outputs:
+  - data/extracted/PracticalMaster.csv
+  - data/extracted/StudentSubjectMap.csv
 """
 
 import re
 import os
-import sys
-import json
 import argparse
 from collections import Counter
 from datetime import datetime
-
 import pdfplumber
 import pandas as pd
 
@@ -32,7 +30,7 @@ SETTINGS_DIR = os.path.join(PROJECT_ROOT, "settings")
 
 os.makedirs(EXTRACTED_DIR, exist_ok=True)
 
-# --- Inline department map (DEPT_MAP) ---
+# --- Inline department map (no external json) ---
 DEPT_MAP = {
     "101": "CIVIL ENGINEERING",
     "102": "MECHANICAL ENGINEERING",
@@ -79,23 +77,20 @@ DEPT_MAP = {
 }
 
 # --- Helper functions ---
-
 def load_dept_map():
-    # Keep compatibility: return inline map (no external JSON)
-    return DEPT_MAP
+    """
+    Return the inline DEPT_MAP (keeps compatibility with previous code that
+    expected load_dept_map()).
+    """
+    # Ensure keys are strings
+    return {str(k): v for k, v in DEPT_MAP.items()}
 
 def parse_institution(text):
-    """
-    Extract institution code and name from the first page text.
-    We support:
-      - "Ins Code Name of the Institution" then a line like "123 GOVERNMENT POLYTECHNIC COLLEGE, KARUR"
-      - "Institution Code" patterns
-      - Fallback: any line starting with CODE + 'GOVERNMENT POLYTECHNIC COLLEGE'
-    """
+    """Extract institution code and name from first page"""
     ins_code = None
     institute_line = None
 
-    # Pattern A: "Ins Code Name of the Institution" block (your PDF)
+    # Pattern A: explicit header block
     m = re.search(r"Ins\s*Code\s*Name\s*of\s*the\s*Institution\s*\n+(\d{2,4})\s+([^\n]+)", text, flags=re.IGNORECASE)
     if m:
         ins_code = m.group(1).strip()
@@ -107,7 +102,7 @@ def parse_institution(text):
         if m:
             ins_code = m.group(1).strip()
 
-    # Pattern C: Any line starting with "<code> GOVERNMENT POLYTECHNIC COLLEGE ..."
+    # Pattern C: any line like "123 GOVERNMENT POLYTECHNIC COLLEGE..."
     if not institute_line:
         m2 = re.search(r"(\d{2,4}\s*,?\s*GOVERNMENT\s+POLYTECHNIC\s+COLLEGE[^\n]*)", text, flags=re.IGNORECASE)
         if m2:
@@ -117,7 +112,6 @@ def parse_institution(text):
                 if mcode:
                     ins_code = mcode.group(1).strip()
 
-    # Compose header text (not strictly needed, but useful)
     header_text = None
     if ins_code and institute_line:
         if not institute_line.strip().startswith(ins_code):
@@ -129,22 +123,14 @@ def parse_institution(text):
 
     return ins_code, institute_line, header_text
 
-
 def detect_page_kind(text):
-    # Summary pages
     if re.search(r"PRACTICAL\s+CHECK\s+LIST\s*\(SUMMARY\)", text, flags=re.IGNORECASE):
         return "summary"
-    # Subject pages
     if re.search(r"PRACTICAL\s+CHECK\s+LIST\s*::", text, flags=re.IGNORECASE):
         return "subject"
     return None
 
-
 def extract_summary_rows(text):
-    """
-    Extract rows from summary pages.
-    Expected columns: SNo NCNO SubCode Subject Name Type NoC
-    """
     rows = []
     started = False
     for raw_line in text.splitlines():
@@ -158,9 +144,7 @@ def extract_summary_rows(text):
         if not started:
             continue
 
-        # Your summary lines are single-spaced; split by >=1 spaces
         parts = re.split(r"\s{1,}", line)
-        # We expect at least 6 parts; subject name may be multiple tokens
         if len(parts) < 6:
             continue
 
@@ -195,13 +179,7 @@ def extract_summary_rows(text):
             continue
     return rows
 
-
 def extract_subject_header(text):
-    """
-    Look for:
-      Practical Code Name of the Practical Subject Type
-      123-1000-CH232451 APPLIED CHEMISTRY - I P
-    """
     practical_code = None
     subject_name = None
     ptype = None
@@ -215,30 +193,7 @@ def extract_subject_header(text):
             break
     return practical_code, subject_name, ptype
 
-
 def extract_student_rows(text):
-    """
-    Parse the student table on a subject page.
-    Your PDF (verified) uses *single* spaces between columns and the header is:
-
-      SNo NCNO Reg No Name of the Candidate DoB Regl Sem Col
-
-    We'll:
-      1) Detect the header line (SNo ... Col)
-      2) For each subsequent non-empty line, match this regex:
-
-         ^(\d+)\s+(\d{3,4})\s+(\d+)\s+(.+?)\s+(\d{2}\.\d{2}\.\d{4})\s+([A-Z0-9]+)\s+(\d+)\s+(\d+)$
-
-       Group map:
-         1 SNo
-         2 NCNO
-         3 Reg No
-         4 Name (greedy minimal)
-         5 DoB dd.mm.yyyy
-         6 Regl (R2023, Z, M, etc.)
-         7 Sem (int)
-         8 Col (int)
-    """
     rows = []
     started = False
     header_seen = False
@@ -251,57 +206,38 @@ def extract_student_rows(text):
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
-            # Stop if we already started and we hit a blank (table ended)
             if started:
                 break
             continue
-
-        # Skip footer lines
         if line.startswith("Page No:"):
             continue
-
-        # Find header
         if not header_seen and header_pattern.search(line):
             header_seen = True
             started = True
             continue
-
-        # If table started, try to parse student rows
         if started:
             m = line_pattern.match(line)
             if m:
                 try:
-                    s_no = int(m.group(1))
-                    ncno = m.group(2)
-                    reg_no = m.group(3)
-                    name = m.group(4).strip()
-                    dob = m.group(5)
-                    regl = m.group(6)
-                    sem = int(m.group(7))
-                    col_no = int(m.group(8))
-
                     rows.append({
-                        "s_no": s_no,
-                        "ncno": ncno,
-                        "reg_no": reg_no,
-                        "student_name": name,
-                        "dob": dob,
-                        "regl": regl,
-                        "sem": sem,
-                        "col_no": col_no,
+                        "s_no": int(m.group(1)),
+                        "ncno": m.group(2),
+                        "reg_no": m.group(3),
+                        "student_name": m.group(4).strip(),
+                        "dob": m.group(5),
+                        "regl": m.group(6),
+                        "sem": int(m.group(7)),
+                        "col_no": int(m.group(8)),
                     })
                 except Exception:
-                    # ignore malformed row
                     pass
             else:
-                # Sometimes long names can cause weird spacing; try a softer split fallback
                 parts = re.split(r"\s{1,}", line)
                 if len(parts) >= 8:
                     try:
                         s_no = int(parts[0])
                         ncno = parts[1]
                         reg_no = parts[2]
-                        # last 4 are dob, regl, sem, col
                         dob = parts[-4]
                         regl = parts[-3]
                         sem = int(parts[-2])
@@ -318,11 +254,8 @@ def extract_student_rows(text):
                             "col_no": col_no,
                         })
                     except Exception:
-                        # If we fail, just skip this line
                         pass
-
     return rows
-
 
 def month_year_from_text(text):
     m = re.search(r"(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{4})",
@@ -331,10 +264,13 @@ def month_year_from_text(text):
         return f"{m.group(1)[:3].upper()} {m.group(2)}"
     return datetime.now().strftime("%b %Y").upper()
 
-
-# --- Main Extraction ---
+# --- Main extraction ---
 def extract_all(pdf_path):
-    dept_map = load_dept_map()
+    # load dept_map (inline)
+    dept_map = load_dept_map() or {}
+    # normalize keys to strings
+    dept_map = {str(k): v for k, v in dept_map.items() if v is not None}
+
     practical_master = {}
     student_rows_all = []
 
@@ -365,10 +301,11 @@ def extract_all(pdf_path):
                     ptype = r["type"]
                     noc = r["noc"]
                     practical_code = f"{ins_code}-{ncno}-{sub_code}" if ins_code else f"{ncno}-{sub_code}"
+                    # use mapping; if not present, leave blank
                     practical_master[practical_code] = {
                         "ins_code": ins_code or "",
                         "ncno": ncno,
-                        "dept_name": dept_map.get(ncno, ""),
+                        "dept_name": dept_map.get(str(ncno), ""),
                         "sub_code": sub_code,
                         "subject_name": subject_name,
                         "type": ptype,
@@ -384,7 +321,6 @@ def extract_all(pdf_path):
                 if not practical_code:
                     continue
 
-                print(f"  -> Extracting student list for {practical_code} ...", end="")
                 stud_rows = extract_student_rows(text)
                 print(f" {len(stud_rows)} students found")
 
@@ -394,7 +330,8 @@ def extract_all(pdf_path):
 
                 for s in stud_rows:
                     ncno = s["ncno"]
-                    dept_name = dept_map.get(ncno, "")
+                    # primary: mapping, fallback: empty string
+                    dept_name = dept_map.get(str(ncno), "")
                     student_rows_all.append({
                         "reg_no": s["reg_no"],
                         "student_name": s["student_name"],
@@ -415,7 +352,7 @@ def extract_all(pdf_path):
                     practical_master[practical_code] = {
                         "ins_code": practical_code.split("-")[0] if "-" in practical_code else (ins_code or ""),
                         "ncno": practical_code.split("-")[1] if "-" in practical_code else "",
-                        "dept_name": dept_map.get(practical_code.split("-")[1], ""),
+                        "dept_name": dept_map.get(str(practical_code.split("-")[1]), ""),
                         "sub_code": practical_code.split("-")[-1],
                         "subject_name": subject_name_pg or "",
                         "type": ptype_pg or "",
@@ -424,13 +361,7 @@ def extract_all(pdf_path):
                         "practical_code": practical_code,
                         "exam_month_year": exam_month_year or "",
                     }
-                else:
-                    if practical_master[practical_code]["col_no"] is None and col_no is not None:
-                        practical_master[practical_code]["col_no"] = col_no
-                    if stud_rows:
-                        practical_master[practical_code]["total_candidates"] = max(
-                            practical_master[practical_code]["total_candidates"], len(stud_rows)
-                        )
+
             else:
                 print("Skipped (no match)")
 
@@ -451,35 +382,30 @@ def extract_all(pdf_path):
         f.write(f"Exam: {exam_month_year}\n")
         f.write(f"PDF: {os.path.basename(pdf_path)}\n")
 
-    print("\n[SUMMARY]")
-    print(f"  Total practicals extracted : {len(pm_df)}")
-    print(f"  Total student rows         : {len(ssm_df)}")
-    print(f"  Exam Month/Year            : {exam_month_year}")
-    print(f"\n[OK] Wrote: {pm_path}")
-    print(f"[OK] Wrote: {ssm_path}")
-    print(f"[OK] Log saved to: {os.path.join(EXTRACTED_DIR, 'extraction_log.txt')}")
-    print("\nExtraction complete.\n")
+    print("\nExtraction complete.")
+    print(f"  Total practicals: {len(pm_df)}")
+    print(f"  Total students  : {len(ssm_df)}")
+    print(f"  Exam: {exam_month_year}")
+    print(f"  Saved → {pm_path} and {ssm_path}")
 
-
+# --- CLI entry point ---
 def find_default_pdf():
     if not os.path.isdir(INPUT_DIR):
         return None
     pdfs = [os.path.join(INPUT_DIR, x) for x in os.listdir(INPUT_DIR) if x.lower().endswith(".pdf")]
     return pdfs[0] if pdfs else None
 
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", "-i", help="Path to the DOTE Practical Checklist PDF")
+    parser.add_argument("--input", "-i", help="Path to PDF")
     args = parser.parse_args()
 
     pdf_path = args.input or find_default_pdf()
     if not pdf_path or not os.path.exists(pdf_path):
-        print("ERROR: No input PDF found. Put your file in data/input_pdf/ or pass --input path.")
-        sys.exit(1)
+        print("ERROR: No PDF found in data/input_pdf/")
+        raise SystemExit(1)
 
     extract_all(pdf_path)
-
 
 if __name__ == "__main__":
     main()
