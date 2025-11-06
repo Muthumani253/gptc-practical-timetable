@@ -1,5 +1,5 @@
 import sys
-# ensure stdout uses utf-8 where possible (no crash on older Python)
+# ensure stdout uses utf-8
 try:
     sys.stdout.reconfigure(encoding='utf-8')
 except Exception:
@@ -15,6 +15,7 @@ Outputs:
 
 import re
 import os
+import json
 import argparse
 from collections import Counter
 from datetime import datetime
@@ -30,79 +31,31 @@ SETTINGS_DIR = os.path.join(PROJECT_ROOT, "settings")
 
 os.makedirs(EXTRACTED_DIR, exist_ok=True)
 
-# --- Inline department map (no external json) ---
-DEPT_MAP = {
-    "101": "CIVIL ENGINEERING",
-    "102": "MECHANICAL ENGINEERING",
-    "103": "ELECTRICAL & ELECTRONICS ENGINEERING",
-    "104": "ELECTRONICS & COMMUNICATION ENGINEERING",
-    "105": "COMPUTER ENGINEERING",
-    "106": "INSTRUMENTATION & CONTROL ENGINEERING",
-    "107": "AUTOMOBILE ENGINEERING",
-    "108": "PRODUCTION ENGINEERING",
-    "109": "TEXTILE TECHNOLOGY",
-    "110": "PRINTING TECHNOLOGY",
-    "111": "LEATHER TECHNOLOGY",
-    "112": "CHEMICAL ENGINEERING",
-    "113": "CERAMIC TECHNOLOGY",
-    "114": "AGRICULTURAL TECHNOLOGY",
-    "115": "ARCHITECTURE ASSISTANTSHIP",
-    "116": "MARINE ENGINEERING",
-    "117": "MECHATRONICS ENGINEERING",
-    "118": "PETROCHEMICAL ENGINEERING",
-    "119": "ROBOTICS & AUTOMATION",
-    "120": "TOOL & DIE ENGINEERING",
-    "121": "INFORMATION TECHNOLOGY",
-    "122": "ARTIFICIAL INTELLIGENCE & MACHINE LEARNING",
-    "123": "CLOUD COMPUTING & BIG DATA",
-    "124": "ARTIFICIAL INTELLIGENCE & DATA SCIENCE",
-    "125": "REFRIGERATION & AIR CONDITIONING",
-    "201": "CIVIL ENGINEERING (SANDWICH)",
-    "202": "MECHANICAL ENGINEERING (SANDWICH)",
-    "203": "ELECTRICAL & ELECTRONICS ENGINEERING (SANDWICH)",
-    "209": "TEXTILE MANUFACTURING",
-    "210": "APPAREL TECHNOLOGY",
-    "211": "PRINTING TECHNOLOGY (DIGITAL PRINTING)",
-    "301": "COMPUTER NETWORKING",
-    "302": "CLOUD COMPUTING",
-    "303": "INTERNET OF THINGS (IoT)",
-    "304": "ARTIFICIAL INTELLIGENCE",
-    "305": "CYBER SECURITY",
-    "401": "COMMERCIAL PRACTICE",
-    "402": "MODERN OFFICE PRACTICE",
-    "403": "LIBRARY & INFORMATION SCIENCE",
-    "404": "HOTEL MANAGEMENT & CATERING TECHNOLOGY",
-    "405": "GARMENT TECHNOLOGY",
-    "406": "FASHION DESIGN & TECHNOLOGY"
-}
 
 # --- Helper functions ---
 def load_dept_map():
-    """
-    Return the inline DEPT_MAP (keeps compatibility with previous code that
-    expected load_dept_map()).
-    """
-    # Ensure keys are strings
-    return {str(k): v for k, v in DEPT_MAP.items()}
+    path = os.path.join(SETTINGS_DIR, "dept_codes.json")
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
 
 def parse_institution(text):
     """Extract institution code and name from first page"""
     ins_code = None
     institute_line = None
 
-    # Pattern A: explicit header block
     m = re.search(r"Ins\s*Code\s*Name\s*of\s*the\s*Institution\s*\n+(\d{2,4})\s+([^\n]+)", text, flags=re.IGNORECASE)
     if m:
         ins_code = m.group(1).strip()
         institute_line = m.group(2).strip()
 
-    # Pattern B: "Institution Code" wording
     if not ins_code:
         m = re.search(r"\bIns(?:titution)?\s*Code.*?\n+(\d{2,4})\b", text, flags=re.IGNORECASE)
         if m:
             ins_code = m.group(1).strip()
 
-    # Pattern C: any line like "123 GOVERNMENT POLYTECHNIC COLLEGE..."
     if not institute_line:
         m2 = re.search(r"(\d{2,4}\s*,?\s*GOVERNMENT\s+POLYTECHNIC\s+COLLEGE[^\n]*)", text, flags=re.IGNORECASE)
         if m2:
@@ -123,12 +76,14 @@ def parse_institution(text):
 
     return ins_code, institute_line, header_text
 
+
 def detect_page_kind(text):
     if re.search(r"PRACTICAL\s+CHECK\s+LIST\s*\(SUMMARY\)", text, flags=re.IGNORECASE):
         return "summary"
     if re.search(r"PRACTICAL\s+CHECK\s+LIST\s*::", text, flags=re.IGNORECASE):
         return "subject"
     return None
+
 
 def extract_summary_rows(text):
     rows = []
@@ -179,6 +134,7 @@ def extract_summary_rows(text):
             continue
     return rows
 
+
 def extract_subject_header(text):
     practical_code = None
     subject_name = None
@@ -192,6 +148,7 @@ def extract_subject_header(text):
             ptype = m.group(3)
             break
     return practical_code, subject_name, ptype
+
 
 def extract_student_rows(text):
     rows = []
@@ -257,6 +214,7 @@ def extract_student_rows(text):
                         pass
     return rows
 
+
 def month_year_from_text(text):
     m = re.search(r"(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{4})",
                   text, flags=re.IGNORECASE)
@@ -264,11 +222,11 @@ def month_year_from_text(text):
         return f"{m.group(1)[:3].upper()} {m.group(2)}"
     return datetime.now().strftime("%b %Y").upper()
 
+
 # --- Main extraction ---
 def extract_all(pdf_path):
-    # load dept_map (inline)
+    # ✅ FIX: normalize dept_map keys to strings
     dept_map = load_dept_map() or {}
-    # normalize keys to strings
     dept_map = {str(k): v for k, v in dept_map.items() if v is not None}
 
     practical_master = {}
@@ -301,11 +259,10 @@ def extract_all(pdf_path):
                     ptype = r["type"]
                     noc = r["noc"]
                     practical_code = f"{ins_code}-{ncno}-{sub_code}" if ins_code else f"{ncno}-{sub_code}"
-                    # use mapping; if not present, leave blank
                     practical_master[practical_code] = {
                         "ins_code": ins_code or "",
                         "ncno": ncno,
-                        "dept_name": dept_map.get(str(ncno), ""),
+                        "dept_name": dept_map.get(str(ncno), ""),  # ✅ Fixed here
                         "sub_code": sub_code,
                         "subject_name": subject_name,
                         "type": ptype,
@@ -330,8 +287,7 @@ def extract_all(pdf_path):
 
                 for s in stud_rows:
                     ncno = s["ncno"]
-                    # primary: mapping, fallback: empty string
-                    dept_name = dept_map.get(str(ncno), "")
+                    dept_name = dept_map.get(str(ncno), "")  # ✅ Fixed here
                     student_rows_all.append({
                         "reg_no": s["reg_no"],
                         "student_name": s["student_name"],
@@ -352,7 +308,7 @@ def extract_all(pdf_path):
                     practical_master[practical_code] = {
                         "ins_code": practical_code.split("-")[0] if "-" in practical_code else (ins_code or ""),
                         "ncno": practical_code.split("-")[1] if "-" in practical_code else "",
-                        "dept_name": dept_map.get(str(practical_code.split("-")[1]), ""),
+                        "dept_name": dept_map.get(str(practical_code.split("-")[1]), ""),  # ✅ Fixed here
                         "sub_code": practical_code.split("-")[-1],
                         "subject_name": subject_name_pg or "",
                         "type": ptype_pg or "",
@@ -361,9 +317,6 @@ def extract_all(pdf_path):
                         "practical_code": practical_code,
                         "exam_month_year": exam_month_year or "",
                     }
-
-            else:
-                print("Skipped (no match)")
 
     pm_path = os.path.join(EXTRACTED_DIR, "PracticalMaster.csv")
     ssm_path = os.path.join(EXTRACTED_DIR, "StudentSubjectMap.csv")
@@ -382,11 +335,12 @@ def extract_all(pdf_path):
         f.write(f"Exam: {exam_month_year}\n")
         f.write(f"PDF: {os.path.basename(pdf_path)}\n")
 
-    print("\nExtraction complete.")
+    print("\n✅ Extraction complete.")
     print(f"  Total practicals: {len(pm_df)}")
     print(f"  Total students  : {len(ssm_df)}")
     print(f"  Exam: {exam_month_year}")
     print(f"  Saved → {pm_path} and {ssm_path}")
+
 
 # --- CLI entry point ---
 def find_default_pdf():
@@ -394,6 +348,7 @@ def find_default_pdf():
         return None
     pdfs = [os.path.join(INPUT_DIR, x) for x in os.listdir(INPUT_DIR) if x.lower().endswith(".pdf")]
     return pdfs[0] if pdfs else None
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -403,9 +358,10 @@ def main():
     pdf_path = args.input or find_default_pdf()
     if not pdf_path or not os.path.exists(pdf_path):
         print("ERROR: No PDF found in data/input_pdf/")
-        raise SystemExit(1)
+        sys.exit(1)
 
     extract_all(pdf_path)
+
 
 if __name__ == "__main__":
     main()
