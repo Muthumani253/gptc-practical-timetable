@@ -1,10 +1,6 @@
 # ui_scheduler_full.py
-# Merged 3-page Streamlit UI:
-# Page 1: PDF Upload / Extract (rare)  — uses extract_pdf.py
-# Page 2: Scheduler (Assign Batches)  — original UI logic preserved
-# Page 3: Download — Finalised (Header edit removed; shows Completed / Not Completed lists; direct download per finalised practical)
-#
-# Created for: MUTHUMANI S — LECTURER-EEE / GPT KARUR
+# Merged 3-page Streamlit UI (fixed): page_upload(), page_scheduler_full(), page_download_full()
+# For: MUTHUMANI S — LECTURER-EEE / GPT KARUR
 
 import streamlit as st
 import pandas as pd
@@ -15,22 +11,34 @@ from io import BytesIO
 # ----- Try imports for existing modules in your app/ directory -----
 try:
     import scheduler_logic as sl
+    SL_IMPORT_ERROR = None
 except Exception as e:
     sl = None
     SL_IMPORT_ERROR = e
 
 try:
     import extract_pdf as extractor
+    EXTRACTOR_IMPORT_ERROR = None
 except Exception as e:
     extractor = None
     EXTRACTOR_IMPORT_ERROR = e
 
 try:
     from export_word import build_subject_docx_bytes, try_convert_docx_to_pdf
+    EXPORT_IMPORT_ERROR = None
 except Exception as e:
     build_subject_docx_bytes = None
     try_convert_docx_to_pdf = None
     EXPORT_IMPORT_ERROR = e
+
+# Supabase helpers expected in app/supabase_utils.py
+try:
+    from supabase_utils import find_or_create_institution, upload_file_bytes
+    SUPABASE_UTILS_ERROR = None
+except Exception as e:
+    find_or_create_institution = None
+    upload_file_bytes = None
+    SUPABASE_UTILS_ERROR = e
 
 # ---------- App constants & top-level styles ----------
 CREATOR = "MUTHUMANI S — LECTURER-EEE / GPT KARUR"
@@ -111,7 +119,8 @@ html, body, [data-testid="stAppViewContainer"] {{
 """, unsafe_allow_html=True)
 
 st.markdown(f'<div class="banner"><h1 style="margin:0;padding:0">{APP_TITLE}</h1>'
-            f'<div style="font-size:13px;margin-top:6px">{CREATOR} <span class="badge">📞 {CONTACT}</span></div></div>', unsafe_allow_html=True)
+            f'<div style="font-size:13px;margin-top:6px">{CREATOR} <span class="badge">📞 {CONTACT}</span></div></div>',
+            unsafe_allow_html=True)
 
 # ---------- Ensure data directories exist (match scheduler_logic paths) ----------
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -164,80 +173,113 @@ def fmt_ampm(hhmm: str) -> str:
 # ---------- Top navigation (page selection) ----------
 nav = st.radio("Go to", ["1 · PDF Upload/Extract (rare)", "2 · Scheduler — Assign Batches", "3 · Download — Finalised"], horizontal=True)
 
-# ---------- Page 1: Upload & Extract ----------
+# ---------- Page 1: Upload PDF & Extract (wrapped in function) ----------
 def page_upload():
+    """
+    Single-institution simplified upload/extract page.
+    - Upload PDF (saved to data/input_pdf/)
+    - Run extractor.extract_all on the saved file
+    - Show resulting CSVs (PracticalMaster.csv, StudentSubjectMap.csv) if present
+    - Keeps same visual card/banner look as original
+    """
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.header("📤 PDF Upload / Extract (rare)")
-    st.markdown("Upload your DOTE Practical Checklist PDF. Extraction writes two CSVs to `data/extracted/`:")
-    st.markdown("- `PracticalMaster.csv` and `StudentSubjectMap.csv`. A short `extraction_log.txt` is also written.")
-    st.caption("Common workflow: upload once, verify CSVs on this page, then use Scheduler page.")
-    if extractor is None:
-        st.error(f"extract_pdf.py not importable. Error: {EXTRACTOR_IMPORT_ERROR if 'EXTRACTOR_IMPORT_ERROR' in globals() else 'unknown'}")
-        st.stop()
+    st.markdown('<h2>📤 Page 1 — Upload PDF & Extract CSVs</h2>', unsafe_allow_html=True)
+    st.write("Upload a single DOTE Practical Checklist PDF. The app will extract two CSVs and store them locally in `data/extracted/`.")
+    st.write("Creator:", CREATOR, "• For queries:", CONTACT)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    upload = st.file_uploader("Upload PDF (or place PDF in data/input_pdf/)", type=["pdf"])
-    default_pdf = extractor.find_default_pdf() if hasattr(extractor, "find_default_pdf") else None
+    # show helpful import errors (but do NOT stop — user may still want to upload and see extractor error)
+    if EXTRACTOR_IMPORT_ERROR:
+        st.warning(f"Warning: extract_pdf import had an error: {EXTRACTOR_IMPORT_ERROR}. Extraction will fail until fixed.")
+    if SUPABASE_UTILS_ERROR:
+        # keep as non-fatal info (we're not using supabase in this page)
+        st.info("Supabase helpers not available (this app is running in single-institution local mode).")
 
-    chosen = None
-    if upload:
-        dest = os.path.join(INPUT_DIR, upload.name)
-        with open(dest, "wb") as f:
-            f.write(upload.getbuffer())
-        st.success(f"Saved uploaded PDF to: `{dest}`")
-        chosen = dest
-    else:
-        if default_pdf:
-            st.info(f"No upload — using `{os.path.basename(default_pdf)}` from data/input_pdf/")
-            chosen = default_pdf
-        else:
-            st.info("No PDF chosen. Upload a file or place it in `data/input_pdf/`.")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("Upload PDF for extraction")
+    pdf_file = st.file_uploader("Select DOTE Practical Checklist PDF", type=["pdf"])
+    if pdf_file is not None:
+        try:
+            pdf_bytes = pdf_file.read()
+            # ensure input directory exists
+            os.makedirs(INPUT_DIR, exist_ok=True)
+            temp_path = os.path.join(INPUT_DIR, pdf_file.name)
+            with open(temp_path, "wb") as f:
+                f.write(pdf_bytes)
+            st.success(f"✅ Saved PDF locally: {temp_path}")
 
-    col1, col2 = st.columns([2,1])
-    with col1:
-        if st.button("🧭 Run extraction now", use_container_width=True):
-            if not chosen:
-                st.error("No PDF available to extract.")
+            # run extractor
+            if extractor is None:
+                st.error("extract_pdf module not available — cannot extract. Check EXTRACTOR_IMPORT_ERROR above.")
             else:
                 try:
-                    with st.spinner("Running extractor..."):
-                        extractor.extract_all(chosen)
-                    st.success("Extraction completed — check data/extracted/ for CSVs")
+                    extractor.extract_all(temp_path)
+                    st.success("✅ Extraction complete — CSVs written to data/extracted/")
                 except Exception as e:
                     st.error(f"Extraction error: {e}")
-    with col2:
-        if st.button("📂 Open extracted folder (show files)", use_container_width=True):
-            files = os.listdir(EXTRACTED_DIR)
-            st.write("Files in data/extracted/:")
-            st.write(files)
+        except Exception as e:
+            st.error(f"Upload/save failed: {e}")
 
+    # Option: run extractor on first PDF in input folder
+    if st.button("Run extractor on first PDF in data/input_pdf"):
+        files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(".pdf")]
+        if not files:
+            st.warning("No PDF found in data/input_pdf/")
+        else:
+            path = os.path.join(INPUT_DIR, files[0])
+            st.info(f"Running extractor on: {path}")
+            if extractor is None:
+                st.error("extract_pdf module not available — cannot extract.")
+            else:
+                try:
+                    extractor.extract_all(path)
+                    st.success("✅ Extraction complete.")
+                except Exception as e:
+                    st.error(f"Extraction error: {e}")
+
+    # After extraction: show extracted CSVs if present
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("Extracted CSVs (preview)")
+
     pm_path = os.path.join(EXTRACTED_DIR, "PracticalMaster.csv")
     ssm_path = os.path.join(EXTRACTED_DIR, "StudentSubjectMap.csv")
-    log_path = os.path.join(EXTRACTED_DIR, "extraction_log.txt")
 
     if os.path.exists(pm_path):
-        pm_df = pd.read_csv(pm_path)
-        st.subheader(f"PracticalMaster.csv — {pm_df.shape[0]} rows")
-        st.dataframe(pm_df.head(10), use_container_width=True, height=240)
+        try:
+            pm_df = pd.read_csv(pm_path, encoding="utf-8-sig")
+            st.markdown("**PracticalMaster.csv**")
+            st.dataframe(pm_df.head(200), use_container_width=True, height=240)
+            st.download_button("⬇ Download PracticalMaster.csv", data=open(pm_path, "rb").read(),
+                               file_name="PracticalMaster.csv", mime="text/csv")
+        except Exception as e:
+            st.error(f"Failed to read PracticalMaster.csv: {e}")
     else:
-        st.info("PracticalMaster.csv not found in data/extracted/")
+        st.info("PracticalMaster.csv not found in data/extracted/ yet.")
 
     if os.path.exists(ssm_path):
-        ssm_df = pd.read_csv(ssm_path)
-        st.subheader(f"StudentSubjectMap.csv — {ssm_df.shape[0]} rows")
-        st.dataframe(ssm_df.head(10), use_container_width=True, height=260)
+        try:
+            ssm_df = pd.read_csv(ssm_path, encoding="utf-8-sig")
+            st.markdown("**StudentSubjectMap.csv**")
+            st.dataframe(ssm_df.head(300), use_container_width=True, height=320)
+            st.download_button("⬇ Download StudentSubjectMap.csv", data=open(ssm_path, "rb").read(),
+                               file_name="StudentSubjectMap.csv", mime="text/csv")
+        except Exception as e:
+            st.error(f"Failed to read StudentSubjectMap.csv: {e}")
     else:
-        st.info("StudentSubjectMap.csv not found in data/extracted/")
+        st.info("StudentSubjectMap.csv not found in data/extracted/ yet.")
 
-    if os.path.exists(log_path):
-        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-            st.subheader("Extraction log")
-            st.text(f.read()[-4000:])
+    # Quick helper: show files in input/extracted for debug
+    with st.expander("Debug: show files in data/input_pdf and data/extracted"):
+        input_files = os.listdir(INPUT_DIR) if os.path.isdir(INPUT_DIR) else []
+        extracted_files = os.listdir(EXTRACTED_DIR) if os.path.isdir(EXTRACTED_DIR) else []
+        st.markdown(f"**data/input_pdf/** ({len(input_files)}): {input_files}")
+        st.markdown(f"**data/extracted/** ({len(extracted_files)}): {extracted_files}")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------- Page 2: Scheduler (original UI preserved) ----------
+
+# ---------- Page 2: Scheduler (Assign Batches) ----------
 def page_scheduler_full():
     if sl is None:
         st.error(f"scheduler_logic.py import failed: {SL_IMPORT_ERROR}")
