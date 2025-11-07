@@ -120,7 +120,7 @@ def build_subject_docx_bytes(practical_code: str, header_overrides: dict | None 
         date_line_auto = dmin if dmin == dmax else f"{dmin} to {dmax}"
 
     # Header fields
-    session_title = header_overrides.get("session_title") or f"BOARD PRACTICAL EXAMINATIONS {datetime.now().strftime('%B').upper()} – {datetime.now().year}"
+    session_title = header_overrides.get("session_title") or f"123 GOVERNMENT POLYTECHNIC COLLEGE, KARUR          BOARD PRACTICAL EXAMINATIONS {datetime.now().strftime('%B').upper()} – {datetime.now().year}"
     institute_line = header_overrides.get("institute_line") or institute_line_guess
     department_line = header_overrides.get("department_line") or f"DEPARTMENT OF {dept_name}".upper()
     subject_code = header_overrides.get("subject_code") or subj_code
