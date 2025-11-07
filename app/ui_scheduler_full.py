@@ -178,9 +178,8 @@ def page_upload():
     """
     Single-institution simplified upload/extract page.
     - Upload PDF (saved to data/input_pdf/)
-    - Run extractor.extract_all on the saved file
-    - Show resulting CSVs (PracticalMaster.csv, StudentSubjectMap.csv) if present
-    - Keeps same visual card/banner look as original
+    - Run extractor when user presses explicit button
+    - Show extraction status, log summary, and preview CSVs
     """
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<h2>📤 Page 1 — Upload PDF & Extract CSVs</h2>', unsafe_allow_html=True)
@@ -207,20 +206,68 @@ def page_upload():
             with open(temp_path, "wb") as f:
                 f.write(pdf_bytes)
             st.success(f"✅ Saved PDF locally: {temp_path}")
-
-            # run extractor
-            if extractor is None:
-                st.error("extract_pdf module not available — cannot extract. Check EXTRACTOR_IMPORT_ERROR above.")
-            else:
-                try:
-                    extractor.extract_all(temp_path)
-                    st.success("✅ Extraction complete — CSVs written to data/extracted/")
-                except Exception as e:
-                    st.error(f"Extraction error: {e}")
+            # store saved path to session for later extraction
+            st.session_state["uploaded_pdf_path"] = temp_path
+            st.info("File saved. Press **Run Extractor** to start extraction.")
         except Exception as e:
             st.error(f"Upload/save failed: {e}")
 
-    # Option: run extractor on first PDF in input folder
+    # Run extractor button (explicit)
+    if st.button("Run Extractor", help="Run extractor on last uploaded PDF (or first PDF in data/input_pdf if none uploaded)"):
+        # determine path to run
+        path_to_run = st.session_state.get("uploaded_pdf_path")
+        if not path_to_run:
+            # fallback to first pdf in input dir
+            files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(".pdf")]
+            if not files:
+                st.warning("No PDF found to extract. Upload a PDF or place one into data/input_pdf/")
+                return
+            path_to_run = os.path.join(INPUT_DIR, files[0])
+            st.info(f"No uploaded file in this session — using first file in data/input_pdf: {path_to_run}")
+
+        if extractor is None:
+            st.error("extract_pdf module not available — cannot extract. Fix import error first.")
+        else:
+            with st.spinner("⏳ Running extractor — this may take a few seconds per page..."):
+                try:
+                    extractor.extract_all(path_to_run)
+                    st.success("✅ Extraction finished — CSVs written to data/extracted/")
+                except Exception as e:
+                    st.error(f"Extraction error: {e}")
+
+        # after extraction show summary if available
+        log_path = os.path.join(EXTRACTED_DIR, "extraction_log.txt")
+        pm_path = os.path.join(EXTRACTED_DIR, "PracticalMaster.csv")
+        ssm_path = os.path.join(EXTRACTED_DIR, "StudentSubjectMap.csv")
+
+        # show log if exists
+        if os.path.exists(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    logtxt = f.read().strip()
+                st.markdown("**Extraction log:**")
+                st.code(logtxt)
+            except Exception:
+                st.info("Extraction finished (could not read log file).")
+
+        # quick summary counts
+        pcount = 0
+        scount = 0
+        if os.path.exists(pm_path):
+            try:
+                pm_df = pd.read_csv(pm_path, encoding="utf-8-sig")
+                pcount = len(pm_df)
+            except Exception:
+                pcount = 0
+        if os.path.exists(ssm_path):
+            try:
+                ssm_df = pd.read_csv(ssm_path, encoding="utf-8-sig")
+                scount = len(ssm_df)
+            except Exception:
+                scount = 0
+        st.info(f"Extraction summary — Practicals parsed: **{pcount}**, Student rows parsed: **{scount}**")
+
+    # Also provide a debug button to run extractor on first PDF in input dir
     if st.button("Run extractor on first PDF in data/input_pdf"):
         files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(".pdf")]
         if not files:
@@ -231,13 +278,13 @@ def page_upload():
             if extractor is None:
                 st.error("extract_pdf module not available — cannot extract.")
             else:
-                try:
-                    extractor.extract_all(path)
-                    st.success("✅ Extraction complete.")
-                except Exception as e:
-                    st.error(f"Extraction error: {e}")
+                with st.spinner("⏳ Running extractor..."):
+                    try:
+                        extractor.extract_all(path)
+                        st.success("✅ Extraction complete.")
+                    except Exception as e:
+                        st.error(f"Extraction error: {e}")
 
-    # After extraction: show extracted CSVs if present
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -578,7 +625,32 @@ def page_scheduler_full():
                 if rem_df.empty:
                     st.success("All students assigned for this subject. ✅")
                 else:
-                    options = rem_df["key"].tolist()
+                    # Build display option as "REG - Name - Dept" for each row
+                    if "reg_no" in rem_df.columns and "student_name" in rem_df.columns:
+                        def _display_row(r):
+                            dept_val = r.get("dept_name","") if isinstance(r, dict) or hasattr(r, "get") else (r["dept_name"] if "dept_name" in r else "")
+                            # guard against NaN
+                            if pd.isna(dept_val):
+                                dept_val = ""
+                            return f"{r['reg_no']} - {r['student_name']}" + (f" - {dept_val}" if dept_val else "")
+                        # rem_df might be a DataFrame; create options from rows
+                        try:
+                            options = rem_df.apply(lambda row: f"{row['reg_no']} - {row['student_name']}" + (f" - {row.get('dept_name','')}" if row.get('dept_name','') else ""), axis=1).tolist()
+                        except Exception:
+                            # fallback: build iteratively
+                            options = []
+                            for _, rr in rem_df.iterrows():
+                                dept_val = rr["dept_name"] if "dept_name" in rr else ""
+                                if pd.isna(dept_val):
+                                    dept_val = ""
+                                options.append(f"{rr['reg_no']} - {rr['student_name']}" + (f" - {dept_val}" if dept_val else ""))
+                    else:
+                        # fallback to existing 'key' column if present
+                        if "key" in rem_df.columns:
+                            options = rem_df["key"].tolist()
+                        else:
+                            options = rem_df.astype(str).apply(lambda r: " - ".join(r.tolist()), axis=1).tolist()
+
                     sel = st.multiselect(f"Select students (Batch {batch_no})", options, key=f"sel_{batch_id}")
 
                     conflict_map_key = f"conflicts_map_{batch_id}"
@@ -595,7 +667,15 @@ def page_scheduler_full():
                     if st.button("Add to List", key=f"stage_{batch_id}", use_container_width=True):
                         st.markdown("<div class='center-msg' style='background:#eff6ff;border:1px solid #dbeafe;'>Added to staged list (not final).</div>", unsafe_allow_html=True)
 
-                        reg_nos = [s.split(" - ")[0] for s in sel]
+                        # reg_nos = [s.split(" - ")[0] for s in sel]
+                        reg_nos = []
+                        for s in sel:
+                            # split on ' - ' (first token is reg_no)
+                            if isinstance(s, str) and " - " in s:
+                                reg_nos.append(s.split(" - ")[0].strip())
+                            else:
+                                reg_nos.append(str(s).strip())
+
                         b_date = b["date"]
                         b_start = b["start_time"]
                         b_end = b["end_time"]
